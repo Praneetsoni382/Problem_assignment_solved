@@ -1,47 +1,7 @@
-import { GoogleAuthProvider, signInWithPopup, signInAnonymously, type User } from "firebase/auth";
+import { signInAnonymously, type User } from "firebase/auth";
 import { doc, getDoc, setDoc } from "firebase/firestore";
 import { auth, db } from "./firebase";
 import type { Profile } from "./db";
-
-/**
- * Sign in using Google Popup and ensure Firestore profile exists
- */
-export async function signInWithGoogle(
-  intendedRole?: "student" | "teacher",
-  details?: { fullName?: string; enrollmentNo?: string | null },
-): Promise<{ user: User; profile: Profile; isNew: boolean }> {
-  const provider = new GoogleAuthProvider();
-  provider.setCustomParameters({ prompt: "select_account" });
-
-  const result = await signInWithPopup(auth, provider);
-  const user = result.user;
-
-  // Check if profile already exists in Firestore
-  const profileRef = doc(db, "profiles", user.uid);
-  const profileSnap = await getDoc(profileRef);
-
-  if (profileSnap.exists()) {
-    const existingProfile = { id: profileSnap.id, ...(profileSnap.data() as Omit<Profile, "id">) };
-    return { user, profile: existingProfile, isNew: false };
-  }
-
-  // Create new profile with specified role or fallback to student
-  const role = intendedRole || "student";
-  const fullName = details?.fullName?.trim() || user.displayName?.trim() || "User";
-  const enrollmentNo = role === "student" ? details?.enrollmentNo?.trim() || "014202" : null;
-
-  const newProfile: Profile = {
-    id: user.uid,
-    email: user.email || "",
-    full_name: fullName,
-    role,
-    enrollment_no: enrollmentNo,
-    created_at: new Date().toISOString(),
-  };
-
-  await setDoc(profileRef, newProfile);
-  return { user, profile: newProfile, isNew: true };
-}
 
 /**
  * Instant 1-Click Demo Login for previewing functionality

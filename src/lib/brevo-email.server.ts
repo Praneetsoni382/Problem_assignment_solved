@@ -3,8 +3,6 @@
  * Handles sending email verification links and password reset links to users
  */
 
-const DEFAULT_BREVO_API_KEY =
-  "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";
 const DEFAULT_SENDER_EMAIL = "praneetsoni20480@gmail.com";
 const SENDER_NAME = "AssignEase";
 
@@ -30,7 +28,7 @@ async function sendBrevoEmail(payload: {
   subject: string;
   htmlContent: string;
 }): Promise<{ success: boolean; messageId?: string }> {
-  const apiKey = process.env.BREVO_API_KEY || DEFAULT_BREVO_API_KEY;
+  const apiKey = process.env.BREVO_API_KEY;
   const senderEmail = process.env.BREVO_SENDER_EMAIL || DEFAULT_SENDER_EMAIL;
 
   if (!apiKey) {

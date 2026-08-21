@@ -1,6 +1,4 @@
 import {
-  GoogleAuthProvider,
-  signInWithPopup,
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
   updateProfile as firebaseUpdateProfile,
@@ -10,7 +8,16 @@ import {
   confirmPasswordReset,
   type User,
 } from "firebase/auth";
-import { doc, getDoc, setDoc, getDocs, collection, query, where } from "firebase/firestore";
+import {
+  doc,
+  getDoc,
+  setDoc,
+  getDocs,
+  collection,
+  query,
+  where,
+  deleteDoc,
+} from "firebase/firestore";
 import { auth, db } from "./firebase";
 import type { Profile } from "./db";
 import {
@@ -101,6 +108,7 @@ export function subscribeToAuth(callback: (profile: Profile | null) => void): ()
 
 /**
  * Register account via Email & Password with Brevo Email Verification
+ * Enforces strict ONE-USER-PER-EMAIL constraint.
  */
 export async function registerWithEmail(params: {
   email: string;
@@ -114,14 +122,45 @@ export async function registerWithEmail(params: {
   const cleanEnrollment = params.role === "student" ? params.enrollmentNo?.trim() || null : null;
   const pwdHash = await hashPassword(params.password);
 
-  let uid = "";
-  let firebaseSuccess = false;
+  // 1. STRICT UNIQUE EMAIL CHECK: Check if email already exists in Firestore user_accounts
+  try {
+    const existingAccountSnap = await getDoc(doc(db, "user_accounts", cleanEmail));
+    if (existingAccountSnap.exists()) {
+      throw new Error(
+        "Email already registered. This email is already associated with an existing account.",
+      );
+    }
+  } catch (err: unknown) {
+    const msg = (err as Error)?.message || "";
+    if (msg.includes("Email already registered")) {
+      throw err;
+    }
+    console.warn("Notice checking user_accounts uniqueness:", err);
+  }
 
-  // 1. Create user in Firebase Authentication with automatic Firestore fallback
+  // 2. STRICT UNIQUE EMAIL CHECK: Check if email already exists in Firestore profiles
+  try {
+    const checkQuery = query(collection(db, "profiles"), where("email", "==", cleanEmail));
+    const checkSnap = await getDocs(checkQuery);
+    if (!checkSnap.empty) {
+      throw new Error(
+        "Email already registered. This email is already associated with an existing account.",
+      );
+    }
+  } catch (err: unknown) {
+    const msg = (err as Error)?.message || "";
+    if (msg.includes("Email already registered")) {
+      throw err;
+    }
+    console.warn("Notice checking profiles uniqueness:", err);
+  }
+
+  let uid = "";
+
+  // 3. Create user in Firebase Authentication
   try {
     const cred = await createUserWithEmailAndPassword(auth, cleanEmail, params.password);
     uid = cred.user.uid;
-    firebaseSuccess = true;
     try {
       await firebaseUpdateProfile(cred.user, { displayName: cleanFullName });
     } catch (e) {
@@ -130,7 +169,9 @@ export async function registerWithEmail(params: {
   } catch (err: unknown) {
     const code = (err as { code?: string })?.code || "";
     if (code === "auth/email-already-in-use") {
-      throw new Error("That email is already registered. Please sign in.");
+      throw new Error(
+        "Email already registered. This email is already associated with an existing account.",
+      );
     }
     console.warn("Firebase Auth registration notice:", code, (err as Error)?.message);
     uid = "usr_" + Math.random().toString(36).substring(2, 9) + Date.now().toString(36);
@@ -141,18 +182,6 @@ export async function registerWithEmail(params: {
     } catch (anonErr) {
       console.warn("Anonymous background auth notice:", anonErr);
     }
-  }
-
-  // 2. Check if Firestore already has this email
-  try {
-    const checkQuery = query(collection(db, "profiles"), where("email", "==", cleanEmail));
-    const checkSnap = await getDocs(checkQuery);
-    if (!checkSnap.empty && !firebaseSuccess) {
-      const firstDoc = checkSnap.docs[0];
-      uid = firstDoc.id;
-    }
-  } catch (checkErr) {
-    console.warn("Error checking existing profiles by email:", checkErr);
   }
 
   const profile: Profile = {
@@ -168,14 +197,14 @@ export async function registerWithEmail(params: {
   const verificationToken = generateSecureToken();
   const tokenExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(); // 24 hours
 
-  // 3. Save to Firestore `profiles`
+  // 4. Save to Firestore `profiles`
   try {
     await setDoc(doc(db, "profiles", uid), profile, { merge: true });
   } catch (e) {
     console.warn("Could not save to profiles doc:", e);
   }
 
-  // 4. Save credentials to Firestore `user_accounts` marked as UNVERIFIED initially
+  // 5. Save credentials to Firestore `user_accounts` marked as UNVERIFIED initially
   try {
     await setDoc(
       doc(db, "user_accounts", cleanEmail),
@@ -197,7 +226,7 @@ export async function registerWithEmail(params: {
     console.warn("Could not save to user_accounts doc:", e);
   }
 
-  // 5. Send Brevo Transactional Email with 1-click verification link
+  // 6. Send Brevo Transactional Email with 1-click verification link
   const origin = getAppPublicOrigin();
   const verificationUrl = `${origin}/verify-email?token=${verificationToken}&email=${encodeURIComponent(cleanEmail)}`;
 
@@ -212,7 +241,6 @@ export async function registerWithEmail(params: {
     });
   } catch (emailErr) {
     console.error("Failed to send Brevo verification email:", emailErr);
-    // Don't crash registration, user can resend from verification screen
   }
 
   return { profile, requiresVerification: true };
@@ -344,7 +372,8 @@ export async function resendVerificationCode(email: string): Promise<string> {
 }
 
 /**
- * Sign In via Email & Password with email verification check
+ * Sign In via Email & Password with email verification check.
+ * Strictly verifies passwords against stored credentials and Firebase Auth.
  */
 export async function loginWithEmail(
   email: string,
@@ -353,48 +382,54 @@ export async function loginWithEmail(
   const cleanEmail = email.trim().toLowerCase();
   const pwdHash = await hashPassword(password);
 
-  // 1. Check Firestore user_accounts
+  let accountFound = false;
+
+  // 1. Check Firestore user_accounts credentials
   try {
     const accountRef = doc(db, "user_accounts", cleanEmail);
     const accountSnap = await getDoc(accountRef);
 
     if (accountSnap.exists()) {
+      accountFound = true;
       const data = accountSnap.data();
 
-      if (data.password_hash === pwdHash) {
-        // Check if email has been verified!
-        if (data.email_verified === false) {
-          throw new Error(
-            "EMAIL_NOT_VERIFIED: Your email address is not verified yet. Please check your email inbox and click the verification button to activate your account.",
-          );
-        }
-
-        // Password matches and verified!
-        const profile: Profile = {
-          id: data.uid,
-          email: data.email,
-          full_name: data.full_name,
-          role: data.role,
-          enrollment_no: data.enrollment_no || null,
-          created_at: data.created_at || new Date().toISOString(),
-        };
-
-        try {
-          if (!auth.currentUser) {
-            await signInAnonymously(auth);
-          }
-        } catch (anonErr) {
-          console.warn("Background signin notice:", anonErr);
-        }
-
-        await setDoc(doc(db, "profiles", data.uid), profile, { merge: true });
-        setLocalSession(profile);
-        return { profile };
+      // STRICT PASSWORD CHECK: If password hash does not match, reject immediately!
+      if (data.password_hash && data.password_hash !== pwdHash) {
+        throw new Error("Incorrect password. Please verify your password or use forgot password.");
       }
+
+      // Check if email has been verified!
+      if (data.email_verified === false) {
+        throw new Error(
+          "EMAIL_NOT_VERIFIED: Your email address is not verified yet. Please check your email inbox and click the verification button to activate your account.",
+        );
+      }
+
+      // Password matches and verified!
+      const profile: Profile = {
+        id: data.uid,
+        email: data.email,
+        full_name: data.full_name,
+        role: data.role,
+        enrollment_no: data.enrollment_no || null,
+        created_at: data.created_at || new Date().toISOString(),
+      };
+
+      try {
+        if (!auth.currentUser) {
+          await signInAnonymously(auth);
+        }
+      } catch (anonErr) {
+        console.warn("Background signin notice:", anonErr);
+      }
+
+      await setDoc(doc(db, "profiles", data.uid), profile, { merge: true });
+      setLocalSession(profile);
+      return { profile };
     }
   } catch (err: unknown) {
     const msg = (err as Error)?.message || "";
-    if (msg.includes("EMAIL_NOT_VERIFIED")) {
+    if (msg.includes("EMAIL_NOT_VERIFIED") || msg.includes("Incorrect password")) {
       throw err;
     }
     console.warn("Error querying user_accounts:", err);
@@ -411,87 +446,29 @@ export async function loginWithEmail(
       return { profile: p };
     }
   } catch (err: unknown) {
+    const code = (err as { code?: string })?.code || "";
+    if (
+      code === "auth/wrong-password" ||
+      code === "auth/invalid-credential" ||
+      code === "auth/invalid-login-credentials"
+    ) {
+      throw new Error("Incorrect password. Please verify your password or use forgot password.");
+    }
+    if (code === "auth/user-not-found") {
+      throw new Error(
+        "No account found with this email. Please check your email or create an account.",
+      );
+    }
     console.warn("Firebase Auth signIn notice:", (err as Error)?.message);
   }
 
-  // 3. Check profiles collection directly
-  try {
-    const q = query(collection(db, "profiles"), where("email", "==", cleanEmail));
-    const snap = await getDocs(q);
-    if (!snap.empty) {
-      const docData = snap.docs[0].data() as Omit<Profile, "id">;
-      const profile: Profile = { id: snap.docs[0].id, ...docData };
-      setLocalSession(profile);
-      return { profile };
-    }
-  } catch (e) {
-    console.warn("Error querying profiles fallback:", e);
+  if (accountFound) {
+    throw new Error("Incorrect password. Please verify your password or use forgot password.");
   }
 
   throw new Error(
     "Incorrect email or password. Please verify your credentials or create an account.",
   );
-}
-
-/**
- * Sign In with Google
- */
-export async function loginWithGoogle(
-  intendedRole?: "student" | "teacher",
-  details?: { fullName?: string; enrollmentNo?: string | null },
-): Promise<{ user: User; profile: Profile; isNew: boolean }> {
-  const provider = new GoogleAuthProvider();
-  provider.setCustomParameters({ prompt: "select_account" });
-
-  const result = await signInWithPopup(auth, provider);
-  const user = result.user;
-
-  const profileRef = doc(db, "profiles", user.uid);
-  const profileSnap = await getDoc(profileRef);
-
-  if (profileSnap.exists()) {
-    const existing = { id: profileSnap.id, ...(profileSnap.data() as Omit<Profile, "id">) };
-    setLocalSession(existing);
-    return { user, profile: existing, isNew: false };
-  }
-
-  const role = intendedRole || "student";
-  const fullName = details?.fullName?.trim() || user.displayName?.trim() || "User";
-  const enrollmentNo = role === "student" ? details?.enrollmentNo?.trim() || "014202" : null;
-
-  const newProfile: Profile = {
-    id: user.uid,
-    email: user.email || "",
-    full_name: fullName,
-    role,
-    enrollment_no: enrollmentNo,
-    created_at: new Date().toISOString(),
-  };
-
-  await setDoc(profileRef, newProfile);
-  // Also store in user_accounts as verified for Google sign-in
-  if (user.email) {
-    try {
-      await setDoc(
-        doc(db, "user_accounts", user.email.toLowerCase()),
-        {
-          uid: user.uid,
-          email: user.email.toLowerCase(),
-          full_name: fullName,
-          role,
-          enrollment_no: enrollmentNo,
-          email_verified: true,
-          created_at: new Date().toISOString(),
-        },
-        { merge: true },
-      );
-    } catch (e) {
-      console.warn("Could not save google user_accounts doc:", e);
-    }
-  }
-
-  setLocalSession(newProfile);
-  return { user, profile: newProfile, isNew: true };
 }
 
 /**
