@@ -1,0 +1,6 @@
+{
+  "name": "AssignEase",
+  "description": "Digital assignment submission and grading portal for students and teachers.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
