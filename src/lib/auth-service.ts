@@ -168,12 +168,10 @@ export async function registerWithEmail(params: {
     }
   } catch (err: unknown) {
     const code = (err as { code?: string })?.code || "";
-    if (code === "auth/email-already-in-use") {
-      throw new Error(
-        "Email already registered. This email is already associated with an existing account.",
-      );
-    }
     console.warn("Firebase Auth registration notice:", code, (err as Error)?.message);
+    // If student was deleted by teacher, Firebase Auth may still hold the email string.
+    // Since we already proved in Steps 1 & 2 that the user does not exist in Firestore,
+    // generate a clean unique UID and allow fresh re-registration.
     uid = "usr_" + Math.random().toString(36).substring(2, 9) + Date.now().toString(36);
     try {
       if (!auth.currentUser) {
@@ -374,6 +372,7 @@ export async function resendVerificationCode(email: string): Promise<string> {
 /**
  * Sign In via Email & Password with email verification check.
  * Strictly verifies passwords against stored credentials and Firebase Auth.
+ * If student was deleted by teacher or does not exist, clearly informs that the email is not registered.
  */
 export async function loginWithEmail(
   email: string,
@@ -382,18 +381,33 @@ export async function loginWithEmail(
   const cleanEmail = email.trim().toLowerCase();
   const pwdHash = await hashPassword(password);
 
-  let accountFound = false;
-
   // 1. Check Firestore user_accounts credentials
   try {
     const accountRef = doc(db, "user_accounts", cleanEmail);
     const accountSnap = await getDoc(accountRef);
 
     if (accountSnap.exists()) {
-      accountFound = true;
       const data = accountSnap.data();
 
-      // STRICT PASSWORD CHECK: If password hash does not match, reject immediately!
+      // Check if student profile was deleted by teacher from the database
+      const profileRef = doc(db, "profiles", data.uid);
+      const profileSnap = await getDoc(profileRef);
+      if (!profileSnap.exists()) {
+        // Profile was permanently deleted by teacher - purge lingering account record and reject login
+        try {
+          await deleteDoc(accountRef);
+        } catch (delErr) {
+          console.warn("Could not delete orphaned account:", delErr);
+        }
+        try {
+          await auth.signOut();
+        } catch {
+          /* ignore */
+        }
+        throw new Error("Email is not registered. Please create an account.");
+      }
+
+      // STRICT PASSWORD CHECK: If password hash does not match, reject with incorrect password message!
       if (data.password_hash && data.password_hash !== pwdHash) {
         throw new Error("Incorrect password. Please verify your password or use forgot password.");
       }
@@ -405,7 +419,7 @@ export async function loginWithEmail(
         );
       }
 
-      // Password matches and verified!
+      // Password matches, profile exists and verified!
       const profile: Profile = {
         id: data.uid,
         email: data.email,
@@ -423,19 +437,46 @@ export async function loginWithEmail(
         console.warn("Background signin notice:", anonErr);
       }
 
-      await setDoc(doc(db, "profiles", data.uid), profile, { merge: true });
       setLocalSession(profile);
       return { profile };
     }
   } catch (err: unknown) {
     const msg = (err as Error)?.message || "";
-    if (msg.includes("EMAIL_NOT_VERIFIED") || msg.includes("Incorrect password")) {
+    if (
+      msg.includes("EMAIL_NOT_VERIFIED") ||
+      msg.includes("Incorrect password") ||
+      msg.includes("Email is not registered")
+    ) {
       throw err;
     }
     console.warn("Error querying user_accounts:", err);
   }
 
-  // 2. Try Firebase Auth sign in
+  // 2. Check if a profile exists at all with this email in Firestore profiles
+  let profileDoc: Profile | null = null;
+  try {
+    const q = query(collection(db, "profiles"), where("email", "==", cleanEmail));
+    const pSnap = await getDocs(q);
+    if (pSnap.empty) {
+      // Student was deleted or never existed in the database!
+      try {
+        await auth.signOut();
+      } catch {
+        /* ignore */
+      }
+      throw new Error("Email is not registered. Please create an account.");
+    }
+    const d = pSnap.docs[0];
+    profileDoc = { id: d.id, ...(d.data() as Omit<Profile, "id">) };
+  } catch (err: unknown) {
+    const msg = (err as Error)?.message || "";
+    if (msg.includes("Email is not registered")) {
+      throw err;
+    }
+    console.warn("Notice querying profiles by email:", err);
+  }
+
+  // 3. Try Firebase Auth sign in if profile was confirmed to exist
   try {
     const cred = await signInWithEmailAndPassword(auth, cleanEmail, password);
     const profileRef = doc(db, "profiles", cred.user.uid);
@@ -444,31 +485,29 @@ export async function loginWithEmail(
       const p = { id: profileSnap.id, ...(profileSnap.data() as Omit<Profile, "id">) };
       setLocalSession(p);
       return { profile: p };
+    } else {
+      // User profile was deleted by teacher in database - reject login and sign out
+      try {
+        await auth.signOut();
+      } catch (soErr) {
+        console.warn("Auth signout notice:", soErr);
+      }
+      throw new Error("Email is not registered. Please create an account.");
     }
   } catch (err: unknown) {
-    const code = (err as { code?: string })?.code || "";
-    if (
-      code === "auth/wrong-password" ||
-      code === "auth/invalid-credential" ||
-      code === "auth/invalid-login-credentials"
-    ) {
-      throw new Error("Incorrect password. Please verify your password or use forgot password.");
-    }
-    if (code === "auth/user-not-found") {
-      throw new Error(
-        "No account found with this email. Please check your email or create an account.",
-      );
+    const msg = (err as Error)?.message || "";
+    if (msg.includes("Email is not registered")) {
+      throw err;
     }
     console.warn("Firebase Auth signIn notice:", (err as Error)?.message);
   }
 
-  if (accountFound) {
+  // If profile existed in database but password did not match Firebase Auth or user_accounts
+  if (profileDoc) {
     throw new Error("Incorrect password. Please verify your password or use forgot password.");
   }
 
-  throw new Error(
-    "Incorrect email or password. Please verify your credentials or create an account.",
-  );
+  throw new Error("Email is not registered. Please create an account.");
 }
 
 /**
@@ -569,7 +608,7 @@ export async function resetPasswordDirectly(email: string, newPassword: string):
     return;
   }
 
-  throw new Error("No account found with this email address. Please create a new account.");
+  throw new Error("Email is not registered. Please create an account.");
 }
 
 /**
@@ -591,7 +630,7 @@ export async function sendPasswordResetEmailLink(email: string): Promise<void> {
     const q = query(collection(db, "profiles"), where("email", "==", cleanEmail));
     const snap = await getDocs(q);
     if (snap.empty) {
-      throw new Error("No account found with this email address.");
+      throw new Error("Email is not registered. Please create an account.");
     }
     userName = snap.docs[0].data().full_name || "User";
   }

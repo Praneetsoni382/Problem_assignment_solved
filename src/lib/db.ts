@@ -101,6 +101,11 @@ export async function getCurrentProfile(): Promise<Profile | null> {
       const p = { id: docSnap.id, ...(docSnap.data() as Omit<Profile, "id">) };
       setLocalSession(p);
       return p;
+    } else {
+      // Profile has been deleted by teacher or removed from database!
+      // Invalidate local session so deleted user cannot access app
+      setLocalSession(null);
+      return null;
     }
   } catch (err) {
     console.warn("Error fetching current profile:", err);
@@ -554,15 +559,60 @@ export async function deleteAssignment(assignmentId: string): Promise<void> {
 }
 
 /**
- * Permanently delete a student profile and all their submissions, pages, question marks, and notifications
+ * Permanently delete a student profile, credentials, and all their submissions, pages, question marks, and notifications
  */
 export async function deleteStudent(studentId: string): Promise<void> {
   if (!studentId) return;
 
-  // 1. Delete profile doc
+  let studentEmail: string | null = null;
+
+  // 1. Fetch profile first to get email for user_accounts cleanup
+  try {
+    const pSnap = await getDoc(doc(db, "profiles", studentId));
+    if (pSnap.exists()) {
+      const data = pSnap.data();
+      if (data?.email) {
+        studentEmail = (data.email as string).toLowerCase().trim();
+      }
+    }
+  } catch (e) {
+    console.warn("Could not fetch profile prior to delete:", e);
+  }
+
+  // 2. Delete profile doc from Firestore
   await deleteDoc(doc(db, "profiles", studentId));
 
-  // 2. Delete all student submissions
+  // 3. Delete credentials from user_accounts collection
+  if (studentEmail) {
+    try {
+      await deleteDoc(doc(db, "user_accounts", studentEmail));
+    } catch (e) {
+      console.warn("Could not delete user_accounts doc by email:", e);
+    }
+
+    try {
+      const qEmailAcc = query(collection(db, "user_accounts"), where("email", "==", studentEmail));
+      const eSnap = await getDocs(qEmailAcc);
+      for (const eDoc of eSnap.docs) {
+        await deleteDoc(doc(db, "user_accounts", eDoc.id));
+      }
+    } catch (err) {
+      console.warn("Notice deleting user_accounts by email query:", err);
+    }
+  }
+
+  try {
+    // Also delete any user_accounts records referencing this uid
+    const qUserAcc = query(collection(db, "user_accounts"), where("uid", "==", studentId));
+    const uSnap = await getDocs(qUserAcc);
+    for (const uDoc of uSnap.docs) {
+      await deleteDoc(doc(db, "user_accounts", uDoc.id));
+    }
+  } catch (err) {
+    console.warn("Notice deleting user_accounts for student:", err);
+  }
+
+  // 4. Delete all student submissions
   try {
     const qSubs = query(collection(db, "submissions"), where("student_id", "==", studentId));
     const subsSnap = await getDocs(qSubs);
@@ -591,7 +641,7 @@ export async function deleteStudent(studentId: string): Promise<void> {
     console.warn("Error deleting student submissions:", err);
   }
 
-  // 3. Delete student notifications
+  // 5. Delete student notifications
   try {
     const qNotifs = query(collection(db, "notifications"), where("user_id", "==", studentId));
     const notifsSnap = await getDocs(qNotifs);
@@ -600,5 +650,14 @@ export async function deleteStudent(studentId: string): Promise<void> {
     }
   } catch (err) {
     console.warn("Error deleting student notifications:", err);
+  }
+
+  // 6. If local user is this student, clear session
+  const local = getLocalSession();
+  if (
+    local &&
+    (local.id === studentId || (studentEmail && local.email?.toLowerCase() === studentEmail))
+  ) {
+    setLocalSession(null);
   }
 }

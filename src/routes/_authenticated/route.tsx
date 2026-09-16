@@ -1,18 +1,10 @@
 import { createFileRoute, Outlet, redirect } from "@tanstack/react-router";
-import { onAuthStateChanged } from "firebase/auth";
-import { auth } from "@/lib/firebase";
-import { getLocalSession } from "@/lib/auth-service";
+import { getCurrentProfile } from "@/lib/db";
 
 async function getAuthenticatedUser() {
-  const local = getLocalSession();
-  if (local) return local;
-  if (auth.currentUser) return auth.currentUser;
-  return new Promise((resolve) => {
-    const unsubscribe = onAuthStateChanged(auth, (user) => {
-      unsubscribe();
-      resolve(user || getLocalSession());
-    });
-  });
+  const profile = await getCurrentProfile();
+  if (!profile) return null;
+  return profile;
 }
 
 export const Route = createFileRoute("/_authenticated")({

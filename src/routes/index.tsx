@@ -107,6 +107,17 @@ function LoginPage() {
                   <AlertCircle className="mt-0.5 size-4 shrink-0 text-red-600 dark:text-red-400" />
                   <div className="flex-1">
                     <p className="leading-snug">{error.replace("EMAIL_NOT_VERIFIED: ", "")}</p>
+                    {error.includes("Email is not registered") && (
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        <Link
+                          to="/register"
+                          search={{ role: "student", email: email.trim().toLowerCase() }}
+                          className="inline-flex items-center gap-1.5 rounded-full bg-[#0F685C] px-3.5 py-1.5 text-xs font-semibold text-white shadow-xs transition hover:bg-[#0c564c]"
+                        >
+                          <span>Create Student Account</span>
+                        </Link>
+                      </div>
+                    )}
                     {error.includes("EMAIL_NOT_VERIFIED") && (
                       <div className="mt-2.5 flex flex-wrap gap-2">
                         <Link
