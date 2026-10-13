@@ -1,6 +1,6 @@
 import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import { useQueryClient } from "@tanstack/react-query";
-import { LogOut, UserRoundPen, FileText, Users, ChevronRight } from "lucide-react";
+import { LogOut, UserRoundPen, FileText, Users, ChevronRight, Sparkles } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { logOutUser } from "@/lib/auth-service";
 import { Button } from "@/components/ui/button";
@@ -8,6 +8,7 @@ import { EditProfileDialog } from "@/components/edit-profile-dialog";
 import { ParticleField } from "@/components/particle-field";
 import { NotificationBell } from "@/components/notification-bell";
 import { AssignEaseLogo } from "@/components/assignease-logo";
+import { TeacherChatDialog } from "@/components/teacher-chat-dialog";
 
 import type { Profile } from "@/lib/db";
 
@@ -23,6 +24,7 @@ export function AppShell({
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [editing, setEditing] = useState(false);
+  const [chatOpen, setChatOpen] = useState(false);
   const routerState = useRouterState();
   const currentPath = routerState.location.pathname;
 
@@ -76,6 +78,22 @@ export function AppShell({
           </div>
 
           <div className="flex items-center gap-2 sm:gap-3">
+            {profile?.role === "teacher" && (
+              <button
+                type="button"
+                onClick={() => setChatOpen(true)}
+                className="relative inline-flex items-center gap-1.5 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-3 py-1.5 text-xs font-semibold text-emerald-800 transition hover:bg-emerald-500/20 hover:border-emerald-500/60 dark:bg-emerald-500/20 dark:text-emerald-300"
+                title="Ask Enquiry — Intelligent Teacher Copilot"
+              >
+                <Sparkles className="size-3.5 text-emerald-600 dark:text-emerald-400" />
+                <span className="hidden sm:inline">Ask Enquiry</span>
+                <span className="sm:hidden">Enquiry</span>
+                <span className="relative flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                </span>
+              </button>
+            )}
             {profile && <NotificationBell userId={profile.id} />}
             {profile && (
               <button
@@ -130,6 +148,32 @@ export function AppShell({
         )}
         {children}
       </main>
+
+      {/* Floating Ask Enquiry Action Launcher for Teachers */}
+      {profile?.role === "teacher" && (
+        <aside aria-label="Teacher Assistant" className="fixed bottom-6 right-6 z-40">
+          <button
+            type="button"
+            onClick={() => setChatOpen(true)}
+            className="group flex items-center gap-2 rounded-full bg-gradient-to-r from-[#0d5c52] to-emerald-600 px-4 py-3 text-white shadow-xl shadow-emerald-950/25 transition-all duration-200 hover:scale-105 hover:shadow-2xl hover:from-[#0b4d45] hover:to-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:ring-offset-2"
+            aria-label="Ask Enquiry - Teacher Assistant"
+          >
+            <div className="relative flex items-center justify-center">
+              <Sparkles className="size-5 transition-transform group-hover:rotate-12" />
+              <span className="absolute -top-1 -right-1 flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-300 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-white"></span>
+              </span>
+            </div>
+            <span className="text-xs font-bold tracking-wide">Ask Enquiry</span>
+          </button>
+        </aside>
+      )}
+
+      {/* Teacher Assistant AI Chat Dialog */}
+      {profile?.role === "teacher" && (
+        <TeacherChatDialog profile={profile} open={chatOpen} onOpenChange={setChatOpen} />
+      )}
     </div>
   );
 }

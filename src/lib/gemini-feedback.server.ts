@@ -51,24 +51,34 @@ Format Requirements:
 - Do NOT include markdown code fences or conversational greetings.
 `;
 
-  // Attempt fastest available multimodal model
-  const candidateModels = ["gemini-3.6-flash", "gemini-3.7-flash", "gemini-2.5-pro"];
+  // Active currently available models with cascading fallback
+  const candidateModels = ["gemini-flash-latest", "gemini-3.1-flash-lite", "gemini-3.8-flash"];
 
   let lastError: unknown = null;
 
   for (const model of candidateModels) {
-    try {
-      const response = await ai.models.generateContent({
-        model,
-        contents: [...inlineParts, { text: promptText }],
-      });
-      const text = response.text?.trim();
-      if (text) {
-        return text;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const response = await ai.models.generateContent({
+          model,
+          contents: [...inlineParts, { text: promptText }],
+        });
+        const text = response.text?.trim();
+        if (text) {
+          return text;
+        }
+      } catch (modelErr: unknown) {
+        console.warn(
+          `[Feedback Cascade] Model ${model} (attempt ${attempt}) failed, trying next candidate...`,
+          modelErr,
+        );
+        lastError = modelErr;
+        if (attempt < 2) {
+          await new Promise((r) => setTimeout(r, 500));
+          continue;
+        }
+        break;
       }
-    } catch (modelErr: unknown) {
-      console.warn(`Model ${model} failed, trying next candidate...`, modelErr);
-      lastError = modelErr;
     }
   }
 
